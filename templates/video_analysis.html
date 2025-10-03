@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎥 Video Analysis System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.8em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.3em;
+            opacity: 0.9;
+        }
+
+        .control-panel {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .control-section {
+            background: rgba(0,0,0,0.2);
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #4CAF50;
+        }
+
+        .control-section h3 {
+            margin-bottom: 15px;
+            color: #4CAF50;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        select, input, button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        select, input {
+            background: rgba(255,255,255,0.9);
+            color: #333;
+        }
+
+        button {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+            cursor: pointer;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 10px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        button.record-btn {
+            background: linear-gradient(45deg, #f44336, #d32f2f);
+        }
+
+        button.analyze-btn {
+            background: linear-gradient(45deg, #2196F3, #1976D2);
+        }
+
+        .status {
+            background: rgba(0,0,0,0.3);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        .video-section, .analysis-section {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .video-list {
+            max-height: 400px;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        .video-item {
+            background: rgba(255,255,255,0.1);
+            margin-bottom: 10px;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #2196F3;
+        }
+
+        .video-name {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .video-details {
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+
+        .video-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .video-actions button {
+            width: auto;
+            padding: 8px 16px;
+            font-size: 12px;
+        }
+
+        .detection-list {
+            max-height: 400px;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        .detection-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 6px;
+            border-left: 4px solid #4CAF50;
+        }
+
+        .detection-name {
+            font-weight: bold;
+            margin-bottom: 3px;
+        }
+
+        .detection-details {
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-item {
+            background: rgba(0,0,0,0.3);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.8;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .success { color: #4CAF50; }
+        .error { color: #f44336; }
+        .warning { color: #ff9800; }
+        .info { color: #2196F3; }
+
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .controls-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎥 Video Analysis System</h1>
+            <p>Record CCTV videos and analyze offline for face recognition</p>
+        </div>
+
+        <div class="control-panel">
+            <div class="controls-grid">
+                <div class="control-section">
+                    <h3>🎬 Video Recording</h3>
+                    <div class="control-group">
+                        <label>CCTV Channel</label>
+                        <select id="record-channel">
+                            <option value="1">Channel 1</option>
+                            <option value="2">Channel 2</option>
+                            <option value="3">Channel 3</option>
+                            <option value="4">Channel 4</option>
+                            <option value="5">Channel 5</option>
+                            <option value="6">Channel 6</option>
+                            <option value="7">Channel 7</option>
+                            <option value="8">Channel 8</option>
+                            <option value="9">Channel 9</option>
+                            <option value="10">Channel 10</option>
+                            <option value="11">Channel 11</option>
+                            <option value="12">Channel 12</option>
+                            <option value="13">Channel 13</option>
+                            <option value="14">Channel 14</option>
+                            <option value="15">Channel 15</option>
+                            <option value="16">Channel 16</option>
+                            <option value="17">Channel 17</option>
+                            <option value="18">Channel 18</option>
+                            <option value="19">Channel 19</option>
+                            <option value="20">Channel 20</option>
+                            <option value="21">Channel 21</option>
+                            <option value="22">Channel 22</option>
+                            <option value="23">Channel 23</option>
+                            <option value="24">Channel 24</option>
+                            <option value="25">Channel 25</option>
+                            <option value="26">Channel 26</option>
+                            <option value="27">Channel 27</option>
+                            <option value="28">Channel 28</option>
+                            <option value="29">Channel 29</option>
+                            <option value="30">Channel 30</option>
+                            <option value="31">Channel 31</option>
+                            <option value="32">Channel 32</option>
+                            <option value="33">Channel 33</option>
+                            <option value="34">Channel 34</option>
+                            <option value="35">Channel 35</option>
+                            <option value="36">Channel 36</option>
+                            <option value="37">Channel 37</option>
+                            <option value="38">Channel 38</option>
+                            <option value="39">Channel 39</option>
+                            <option value="40">Channel 40</option>
+                            <option value="41">Channel 41</option>
+                            <option value="42">Channel 42</option>
+                            <option value="43">Channel 43</option>
+                            <option value="44">Channel 44</option>
+                            <option value="45">Channel 45</option>
+                            <option value="46">Channel 46</option>
+                            <option value="47">Channel 47</option>
+                            <option value="48">Channel 48</option>
+                            <option value="49">Channel 49</option>
+                            <option value="50">Channel 50</option>
+                            <option value="51">Channel 51</option>
+                            <option value="52">Channel 52</option>
+                            <option value="53">Channel 53</option>
+                            <option value="54">Channel 54</option>
+                            <option value="55">Channel 55</option>
+                            <option value="56">Channel 56</option>
+                            <option value="57">Channel 57</option>
+                            <option value="58">Channel 58</option>
+                            <option value="59">Channel 59</option>
+                            <option value="60">Channel 60</option>
+                            <option value="61">Channel 61</option>
+                            <option value="62">Channel 62</option>
+                            <option value="63">Channel 63</option>
+                            <option value="64">Channel 64</option>
+                            <option value="65">Channel 65</option>
+                            <option value="66">Channel 66</option>
+                            <option value="67">Channel 67</option>
+                            <option value="68">Channel 68</option>
+                            <option value="69">Channel 69</option>
+                            <option value="70">Channel 70</option>
+                            <option value="71">Channel 71</option>
+                            <option value="72">Channel 72</option>
+                            <option value="73">Channel 73</option>
+                            <option value="74">Channel 74</option>
+                            <option value="75">Channel 75</option>
+                            <option value="76">Channel 76</option>
+                            <option value="77">Channel 77</option>
+                            <option value="78">Channel 78</option>
+                            <option value="79">Channel 79</option>
+                            <option value="80">Channel 80</option>
+                            <option value="81">Channel 81</option>
+                            <option value="82">Channel 82</option>
+                            <option value="83">Channel 83</option>
+                            <option value="84">Channel 84</option>
+                            <option value="85">Channel 85</option>
+                            <option value="86">Channel 86</option>
+                            <option value="87">Channel 87</option>
+                            <option value="88">Channel 88</option>
+                            <option value="89">Channel 89</option>
+                            <option value="90">Channel 90</option>
+                            <option value="91">Channel 91</option>
+                            <option value="92">Channel 92</option>
+                            <option value="93">Channel 93</option>
+                            <option value="94">Channel 94</option>
+                            <option value="95">Channel 95</option>
+                            <option value="96">Channel 96</option>
+                            <option value="97">Channel 97</option>
+                            <option value="98">Channel 98</option>
+                            <option value="99">Channel 99</option>
+                            <option value="100">Channel 100</option>
+                            <option value="101">Channel 101</option>
+                            <option value="102">Channel 102</option>
+                            <option value="103">Channel 103</option>
+                            <option value="104">Channel 104</option>
+                            <option value="105">Channel 105</option>
+                            <option value="106">Channel 106</option>
+                            <option value="107">Channel 107</option>
+                            <option value="108">Channel 108</option>
+                            <option value="109">Channel 109</option>
+                            <option value="110">Channel 110</option>
+                            <option value="111">Channel 111</option>
+                            <option value="112">Channel 112</option>
+                            <option value="113">Channel 113</option>
+                            <option value="114">Channel 114</option>
+                            <option value="115">Channel 115</option>
+                            <option value="116">Channel 116</option>
+                            <option value="117">Channel 117</option>
+                            <option value="118">Channel 118</option>
+                            <option value="119">Channel 119</option>
+                            <option value="120">Channel 120</option>
+                            <option value="121">Channel 121</option>
+                            <option value="122">Channel 122</option>
+                            <option value="123">Channel 123</option>
+                            <option value="124">Channel 124</option>
+                            <option value="125">Channel 125</option>
+                            <option value="126">Channel 126</option>
+                            <option value="127">Channel 127</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Duration (seconds)</label>
+                        <input type="number" id="record-duration" value="60" min="10" max="300">
+                    </div>
+                    <button id="record-btn" class="record-btn">🔴 Start Recording</button>
+                </div>
+
+                <div class="control-section">
+                    <h3>🧠 Face Recognition</h3>
+                    <div class="control-group">
+                        <button id="load-faces-btn">📚 Load Employee Faces</button>
+                    </div>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-number" id="faces-count">0</div>
+                            <div class="stat-label">Faces Loaded</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-number" id="videos-count">0</div>
+                            <div class="stat-label">Videos</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="status" id="status">
+                🚀 System ready! Load faces and start recording CCTV videos.
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="video-section">
+                <h3 style="margin-bottom: 15px;">📹 Recorded Videos</h3>
+                <button id="refresh-videos" style="margin-bottom: 15px;">🔄 Refresh Videos</button>
+                <div class="video-list" id="video-list">
+                    <div style="text-align: center; opacity: 0.6; padding: 20px;">
+                        No videos recorded yet...
+                    </div>
+                </div>
+            </div>
+
+            <div class="analysis-section">
+                <h3 style="margin-bottom: 15px;">🎯 Detection Results</h3>
+                <div class="detection-list" id="detection-list">
+                    <div style="text-align: center; opacity: 0.6; padding: 20px;">
+                        No detections yet...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let systemStatus = {
+            recording: false,
+            analyzing: false,
+            facesLoaded: 0
+        };
+
+        // DOM Elements
+        const recordBtn = document.getElementById('record-btn');
+        const loadFacesBtn = document.getElementById('load-faces-btn');
+        const refreshVideosBtn = document.getElementById('refresh-videos');
+        const recordChannel = document.getElementById('record-channel');
+        const recordDuration = document.getElementById('record-duration');
+        const status = document.getElementById('status');
+        const facesCount = document.getElementById('faces-count');
+        const videosCount = document.getElementById('videos-count');
+        const videoList = document.getElementById('video-list');
+        const detectionList = document.getElementById('detection-list');
+
+        // Update status
+        function updateStatus(message, type = 'info') {
+            status.innerHTML = `<span class="${type}">${message}</span>`;
+        }
+
+        // Load faces
+        loadFacesBtn.addEventListener('click', async () => {
+            loadFacesBtn.innerHTML = '<span class="loading"></span> Loading...';
+            loadFacesBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/load_faces', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    systemStatus.facesLoaded = data.count;
+                    facesCount.textContent = data.count;
+                    updateStatus(`✅ ${data.message}`, 'success');
+                } else {
+                    updateStatus(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                updateStatus(`❌ Error loading faces: ${error.message}`, 'error');
+            }
+
+            loadFacesBtn.innerHTML = '📚 Load Employee Faces';
+            loadFacesBtn.disabled = false;
+        });
+
+        // Record video
+        recordBtn.addEventListener('click', async () => {
+            if (systemStatus.recording) {
+                updateStatus('⚠️ Recording already in progress!', 'warning');
+                return;
+            }
+
+            if (systemStatus.facesLoaded === 0) {
+                updateStatus('⚠️ Please load faces first!', 'warning');
+                return;
+            }
+
+            const channel = recordChannel.value;
+            const duration = parseInt(recordDuration.value);
+
+            recordBtn.innerHTML = '<span class="loading"></span> Recording...';
+            recordBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/record_video', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ channel, duration })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    updateStatus(`🎬 ${data.message}`, 'info');
+                    
+                    // Start progress tracking
+                    trackRecording(duration);
+                } else {
+                    updateStatus(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                updateStatus(`❌ Recording error: ${error.message}`, 'error');
+            }
+
+            recordBtn.innerHTML = '🔴 Start Recording';
+            recordBtn.disabled = false;
+        });
+
+        // Track recording progress
+        function trackRecording(duration) {
+            let elapsed = 0;
+            const interval = setInterval(() => {
+                elapsed++;
+                const progress = (elapsed / duration) * 100;
+                updateStatus(`🎬 Recording... ${elapsed}/${duration}s (${progress.toFixed(1)}%)`, 'info');
+                
+                if (elapsed >= duration) {
+                    clearInterval(interval);
+                    updateStatus('✅ Recording completed! Refreshing video list...', 'success');
+                    setTimeout(refreshVideos, 2000);
+                }
+            }, 1000);
+        }
+
+        // Refresh videos
+        refreshVideosBtn.addEventListener('click', refreshVideos);
+
+        async function refreshVideos() {
+            try {
+                const response = await fetch('/api/videos');
+                const data = await response.json();
+                
+                videosCount.textContent = data.videos.length;
+                updateVideoList(data.videos);
+            } catch (error) {
+                console.error('Error fetching videos:', error);
+            }
+        }
+
+        // Update video list
+        function updateVideoList(videos) {
+            if (videos.length === 0) {
+                videoList.innerHTML = `
+                    <div style="text-align: center; opacity: 0.6; padding: 20px;">
+                        No videos recorded yet...
+                    </div>
+                `;
+                return;
+            }
+
+            videoList.innerHTML = videos.map(video => `
+                <div class="video-item">
+                    <div class="video-name">📹 ${video.filename}</div>
+                    <div class="video-details">
+                        📊 Size: ${video.size_mb} MB • ⏰ Created: ${video.created}
+                    </div>
+                    <div class="video-actions">
+                        <button onclick="analyzeVideo('${video.path}')" class="analyze-btn">
+                            🔍 Analyze
+                        </button>
+                        <button onclick="downloadVideo('${video.filename}')">
+                            📥 Download
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Analyze video
+        window.analyzeVideo = async function(videoPath) {
+            if (systemStatus.analyzing) {
+                updateStatus('⚠️ Analysis already in progress!', 'warning');
+                return;
+            }
+
+            updateStatus('🔍 Starting video analysis...', 'info');
+
+            try {
+                const response = await fetch('/api/analyze_video', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ video_path: videoPath })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    updateStatus('🔍 Video analysis in progress... This may take a few minutes.', 'info');
+                    
+                    // Refresh detections periodically
+                    setTimeout(() => {
+                        refreshDetections();
+                        updateStatus('✅ Video analysis completed! Check detection results.', 'success');
+                    }, 5000);
+                } else {
+                    updateStatus(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                updateStatus(`❌ Analysis error: ${error.message}`, 'error');
+            }
+        };
+
+        // Download video
+        window.downloadVideo = function(filename) {
+            window.open(`/api/download_video/${filename}`, '_blank');
+        };
+
+        // Refresh detections
+        async function refreshDetections() {
+            try {
+                const response = await fetch('/api/detections');
+                const data = await response.json();
+                
+                updateDetectionList(data.detections);
+            } catch (error) {
+                console.error('Error fetching detections:', error);
+            }
+        }
+
+        // Update detection list
+        function updateDetectionList(detections) {
+            if (detections.length === 0) {
+                detectionList.innerHTML = `
+                    <div style="text-align: center; opacity: 0.6; padding: 20px;">
+                        No detections yet...
+                    </div>
+                `;
+                return;
+            }
+
+            detectionList.innerHTML = detections.map(detection => `
+                <div class="detection-item">
+                    <div class="detection-name">👤 ${detection.name}</div>
+                    <div class="detection-details">
+                        📹 ${detection.camera} • ⏰ ${detection.time}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Auto-refresh
+        setInterval(refreshDetections, 10000); // Every 10 seconds
+        setInterval(refreshVideos, 30000); // Every 30 seconds
+
+        // Initial load
+        window.addEventListener('load', () => {
+            refreshVideos();
+            refreshDetections();
+        });
+    </script>
+</body>
+</html>

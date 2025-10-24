@@ -16,6 +16,8 @@ import threading
 import time
 import base64
 import json
+import os
+from ultralytics import YOLO
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +35,20 @@ class WebFaceRecognition:
         self.current_frame = None
         self.detection_results = []
         self.last_detection = {}  # Track last detection time for each person
+        self.face_crop_counter = 0  # Counter for saving face crops
+        
+        # Create face crops directories
+        self.face_crops_dir = "face_crops"
+        self.detected_faces_dir = os.path.join(self.face_crops_dir, "detected_faces")
+        self.unknown_faces_dir = os.path.join(self.face_crops_dir, "unknown_faces")
+        
+        # Initialize YOLO model for human detection
+        try:
+            self.yolo_model = YOLO('yolov8n.pt')  # Load YOLOv8 nano model
+            logger.info("✅ YOLO model loaded successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to load YOLO model: {e}")
+            self.yolo_model = None
         
     def connect_database(self):
         """Connect to MySQL database"""
@@ -83,6 +99,71 @@ class WebFaceRecognition:
         except Exception as e:
             logger.error(f"❌ Error loading face data: {e}")
             return False
+    
+    def save_face_crop(self, frame, face_box, name="Unknown", confidence=0):
+        """Save cropped face image"""
+        try:
+            left, top, right, bottom = face_box
+            
+            # Ensure coordinates are valid
+            height, width = frame.shape[:2]
+            left = max(0, min(left, width))
+            right = max(0, min(right, width))
+            top = max(0, min(top, height))
+            bottom = max(0, min(bottom, height))
+            
+            if left >= right or top >= bottom:
+                logger.warning("Invalid face box coordinates")
+                return None
+            
+            # Add padding around face
+            padding = 30
+            y1 = max(0, top - padding)
+            y2 = min(height, bottom + padding)
+            x1 = max(0, left - padding)
+            x2 = min(width, right + padding)
+            
+            # Crop face with padding
+            face_crop = frame[y1:y2, x1:x2]
+            
+            if face_crop.size == 0:
+                logger.warning("Empty face crop")
+                return None
+            
+            # Resize face crop for consistency
+            face_crop = cv2.resize(face_crop, (150, 150))
+            
+            # Generate filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+            self.face_crop_counter += 1
+            
+            # Clean name for filename
+            clean_name = name.replace(' ', '_').replace('(', '').replace(')', '').replace(':', '')
+            
+            if name != "Unknown":
+                # Save in detected_faces folder
+                filename = f"{clean_name}_{confidence:.1f}pct_{timestamp}_{self.face_crop_counter:04d}.jpg"
+                save_path = os.path.join(self.detected_faces_dir, filename)
+            else:
+                # Save in unknown_faces folder
+                filename = f"unknown_{timestamp}_{self.face_crop_counter:04d}.jpg"
+                save_path = os.path.join(self.unknown_faces_dir, filename)
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            
+            # Save the cropped face
+            success = cv2.imwrite(save_path, face_crop)
+            if success:
+                logger.info(f"💾 Face crop saved: {filename}")
+                return save_path
+            else:
+                logger.error(f"Failed to save face crop: {filename}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"Error saving face crop: {e}")
+            return None
     
     def log_detection(self, employee_name, camera_source):
         """Log face detection to database"""
@@ -164,8 +245,33 @@ class WebFaceRecognition:
         
         logger.info("🛑 Camera stopped")
     
+    def detect_humans_yolo(self, frame):
+        """Use YOLO to detect human bodies first"""
+        if not self.yolo_model:
+            return []
+        
+        try:
+            # Run YOLO detection
+            results = self.yolo_model(frame, verbose=False)
+            human_boxes = []
+            
+            for r in results:
+                boxes = r.boxes
+                if boxes is not None:
+                    for box in boxes:
+                        # Class 0 is 'person' in COCO dataset
+                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:
+                            # Get bounding box coordinates
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            human_boxes.append((int(x1), int(y1), int(x2), int(y2)))
+            
+            return human_boxes
+        except Exception as e:
+            logger.error(f"YOLO detection error: {e}")
+            return []
+    
     def process_frame(self):
-        """Process current frame for face recognition"""
+        """Process current frame with YOLO + face recognition"""
         if not self.current_camera or not self.camera_active:
             return None, []
         
@@ -173,15 +279,20 @@ class WebFaceRecognition:
         if not ret:
             return None, []
         
+        detections = []
+        
+        # SIMPLE APPROACH: Skip YOLO for now, use direct face recognition
+        # This ensures face detection works even if YOLO fails
+        
         # Resize for faster processing
         small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
         rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
         
-        # Find faces
+        # Find faces directly
         face_locations = face_recognition.face_locations(rgb_small_frame)
         face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
         
-        detections = []
+        logger.info(f"🔍 Found {len(face_locations)} faces in frame")
         
         for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
             # Scale back up
@@ -203,15 +314,23 @@ class WebFaceRecognition:
                     name = self.known_face_names[best_match_index]
                     confidence = round((1 - face_distances[best_match_index]) * 100, 1)
                     
-                    # Log detection only if not detected recently (avoid spam)
+                    # Log detection
                     current_time = time.time()
-                    if name not in self.last_detection or (current_time - self.last_detection[name]) > 5:  # 5 second cooldown
+                    if name not in self.last_detection or (current_time - self.last_detection[name]) > 5:
                         self.log_detection(name, self.camera_name)
                         self.last_detection[name] = current_time
+                        logger.info(f"✅ Detected: {name} with {confidence}% confidence")
+            
+            # Save face crop for every detection
+            face_box = [left, top, right, bottom]
+            crop_path = self.save_face_crop(frame, face_box, name, confidence)
+            if crop_path:
+                logger.info(f"💾 Face crop saved: {crop_path}")
             
             # Draw on frame
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 255, 0), cv2.FILLED)
+            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
             cv2.putText(frame, f"{name} ({confidence}%)", (left + 6, bottom - 6), 
                        cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
             
@@ -221,13 +340,95 @@ class WebFaceRecognition:
                 'location': [left, top, right, bottom]
             })
         
-        # Add camera info
+        # Optional: Try YOLO if available and no faces found with traditional method
+        if len(detections) == 0 and self.yolo_model:
+            logger.info("🤖 No faces found with traditional method, trying YOLO...")
+            try:
+                human_boxes = self.detect_humans_yolo(frame)
+                logger.info(f"🤖 YOLO found {len(human_boxes)} human bodies")
+                
+                # Process each detected human area
+                for (x1, y1, x2, y2) in human_boxes:
+                    # Draw YOLO detection box
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 1)  # Blue box for human detection
+                    
+                    # Crop human region for face detection
+                    human_crop = frame[y1:y2, x1:x2]
+                    if human_crop.size == 0:
+                        continue
+                    
+                    # Focus on upper part of body for face
+                    height, width = human_crop.shape[:2]
+                    face_area = human_crop[0:int(height*0.4), :]  # Top 40% of human body
+                    
+                    if face_area.size == 0:
+                        continue
+                    
+                    # Process face area
+                    small_face_area = cv2.resize(face_area, (0, 0), fx=0.5, fy=0.5)
+                    rgb_small_face = cv2.cvtColor(small_face_area, cv2.COLOR_BGR2RGB)
+                    
+                    face_locations = face_recognition.face_locations(rgb_small_face)
+                    face_encodings = face_recognition.face_encodings(rgb_small_face, face_locations)
+                    
+                    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+                        # Scale back to original coordinates
+                        top = int(top * 2) + y1
+                        right = int(right * 2) + x1
+                        bottom = int(bottom * 2) + y1
+                        left = int(left * 2) + x1
+                        
+                        # Face recognition
+                        matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding)
+                        name = "Unknown"
+                        confidence = 0
+                        
+                        if True in matches:
+                            face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
+                            best_match_index = np.argmin(face_distances)
+                            
+                            if matches[best_match_index] and face_distances[best_match_index] < 0.6:
+                                name = self.known_face_names[best_match_index]
+                                confidence = round((1 - face_distances[best_match_index]) * 100, 1)
+                                
+                                # Log detection
+                                current_time = time.time()
+                                if name not in self.last_detection or (current_time - self.last_detection[name]) > 5:
+                                    self.log_detection(name, self.camera_name)
+                                    self.last_detection[name] = current_time
+                        
+                        # Save face crop
+                        face_box = [left, top, right, bottom]
+                        crop_path = self.save_face_crop(frame, face_box, name, confidence)
+                        if crop_path:
+                            logger.info(f"💾 YOLO Face crop saved: {crop_path}")
+                        
+                        # Draw face detection
+                        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+                        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+                        cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+                        cv2.putText(frame, f"{name} ({confidence}%)", (left + 6, bottom - 6), 
+                                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+                        
+                        detections.append({
+                            'name': name,
+                            'confidence': confidence,
+                            'location': [left, top, right, bottom]
+                        })
+            except Exception as e:
+                logger.error(f"YOLO processing error: {e}")
+        
+        # Add camera info and debug information
         cv2.putText(frame, f"Camera: {self.camera_name}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"Time: {datetime.now().strftime('%H:%M:%S')}", (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"Employees: {len(self.known_face_encodings)}", (10, 90), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame, f"Faces Found: {len(detections)}", (10, 120), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(frame, f"Crops Saved: {self.face_crop_counter}", (10, 150), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         
         return frame, detections
 
@@ -320,6 +521,51 @@ def get_detections():
         return jsonify({'detections': detections})
     except:
         return jsonify({'detections': []})
+
+@app.route('/api/face_crops')
+def get_face_crops():
+    """Get list of saved face crops"""
+    try:
+        crops_data = {
+            'detected_faces': [],
+            'unknown_faces': []
+        }
+        
+        # Get detected faces
+        if os.path.exists(face_recognizer.detected_faces_dir):
+            detected_files = os.listdir(face_recognizer.detected_faces_dir)
+            detected_files.sort(reverse=True)  # Latest first
+            crops_data['detected_faces'] = detected_files[:50]  # Latest 50
+        
+        # Get unknown faces
+        if os.path.exists(face_recognizer.unknown_faces_dir):
+            unknown_files = os.listdir(face_recognizer.unknown_faces_dir)
+            unknown_files.sort(reverse=True)  # Latest first
+            crops_data['unknown_faces'] = unknown_files[:50]  # Latest 50
+        
+        return jsonify(crops_data)
+    except Exception as e:
+        logger.error(f"Error getting face crops: {e}")
+        return jsonify({'detected_faces': [], 'unknown_faces': []})
+
+@app.route('/api/face_crop/<path:filename>')
+def serve_face_crop(filename):
+    """Serve face crop image"""
+    try:
+        # Check in detected_faces first
+        detected_path = os.path.join(face_recognizer.detected_faces_dir, filename)
+        if os.path.exists(detected_path):
+            return app.send_static_file(f"../face_crops/detected_faces/{filename}")
+        
+        # Check in unknown_faces
+        unknown_path = os.path.join(face_recognizer.unknown_faces_dir, filename)
+        if os.path.exists(unknown_path):
+            return app.send_static_file(f"../face_crops/unknown_faces/{filename}")
+        
+        return "File not found", 404
+    except Exception as e:
+        logger.error(f"Error serving face crop: {e}")
+        return "Error", 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)

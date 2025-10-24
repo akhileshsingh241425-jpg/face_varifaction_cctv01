@@ -4,12 +4,11 @@ Factory Employee Recogni    print("\n📋 Available Operations:")
     print("1. Setup Database")
     print("2. Sync HRM Data")  
     print("3. Process Face Embeddings")
-    print("4. 🌐 Web Interface (Live Camera)")
-    print("5. 🎥 Video Analysis System (Record & Analyze)")
-    print("6. 🎯 Check Detection Results")
-    print("7. Run Complete Setup (All steps)")
+    print("4. 🌐 Web Interface (Live Face Recognition)")
+    print("5. 🎯 Check Detection Results")
+    print("6. Run Complete Setup (All steps)")
     
-    choice = input("\nSelect operation (1-7): ").strip()tem
+    choice = input("\nSelect operation (1-6): ").strip()tem
 =================================
 Complete employee recognition system for factory monitoring.
 """
@@ -49,8 +48,7 @@ def main():
         'complete_db_setup.py',
         'hrm_sync.py', 
         'face_processing.py',
-        'web_face_recognition.py',
-        'video_analysis_system.py'
+        'web_face_recognition.py'
     ]
     
     missing_files = [f for f in required_files if not Path(f).exists()]
@@ -80,18 +78,14 @@ def main():
         run_script("face_processing.py", "Processing face embeddings")
         
     elif choice == "4":
-        print("\n🌐 Starting Web Interface...")
-        run_script("web_face_recognition.py", "Starting Web Interface")
+        print("\n🌐 Starting Live Face Recognition...")
+        run_script("web_face_recognition.py", "Starting Live Face Recognition")
         
     elif choice == "5":
-        print("\n🎥 Starting Video Analysis System...")
-        run_script("video_analysis_system.py", "Starting Video Analysis System")
-        
-    elif choice == "6":
         print("\n🎯 Checking Detection Results...")
         run_script("check_detections.py", "Checking Detection Results")
         
-    elif choice == "7":
+    elif choice == "6":
         print("\n🚀 Running complete setup...")
         
         steps = [
@@ -116,7 +110,7 @@ def main():
             print("\n❌ Setup failed. Please check the errors above.")
             
     else:
-        print("❌ Invalid choice. Please select 1-8.")
+        print("❌ Invalid choice. Please select 1-6.")
 
 if __name__ == "__main__":
     main()

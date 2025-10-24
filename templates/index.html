@@ -484,6 +484,18 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="info-panel">
+                    <h3>📸 Face Crops</h3>
+                    <div class="control-group">
+                        <button id="view-crops-btn" style="width: 100%; margin-bottom: 10px;">View Face Crops</button>
+                    </div>
+                    <div class="detection-list" id="face-crops-list" style="max-height: 200px;">
+                        <div style="text-align: center; opacity: 0.6; padding: 20px;">
+                            Click "View Face Crops" to load...
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -508,6 +520,8 @@
         const cameraStatusStat = document.getElementById('camera-status');
         const currentCameraStat = document.getElementById('current-camera');
         const detectionList = document.getElementById('detection-list');
+        const viewCropsBtn = document.getElementById('view-crops-btn');
+        const faceCropsList = document.getElementById('face-crops-list');
 
         // Show/hide channel selection and auto-restart camera
         cameraType.addEventListener('change', async () => {
@@ -708,6 +722,60 @@
                 </div>
             `).join('');
         }
+
+        // View Face Crops
+        viewCropsBtn.addEventListener('click', async () => {
+            try {
+                updateStatus('📸 Loading face crops...', 'info');
+                viewCropsBtn.innerHTML = '<span class="loading"></span> Loading...';
+                
+                const response = await fetch('/api/face_crops');
+                const data = await response.json();
+                
+                let cropsHtml = '';
+                
+                // Show detected faces
+                if (data.detected_faces && data.detected_faces.length > 0) {
+                    cropsHtml += '<div style="font-size: 0.9em; color: #4CAF50; margin-bottom: 10px; font-weight: bold;">✅ Detected Faces:</div>';
+                    data.detected_faces.slice(0, 10).forEach(filename => {
+                        const displayName = filename.split('_')[0].replace(/[0-9]/g, '');
+                        cropsHtml += `
+                            <div class="detection-item" style="padding: 5px; margin-bottom: 5px;">
+                                <div style="font-size: 0.8em;">${displayName}</div>
+                                <div style="font-size: 0.7em; opacity: 0.7;">${filename}</div>
+                            </div>
+                        `;
+                    });
+                }
+                
+                // Show unknown faces
+                if (data.unknown_faces && data.unknown_faces.length > 0) {
+                    cropsHtml += '<div style="font-size: 0.9em; color: #FF9800; margin: 10px 0; font-weight: bold;">❓ Unknown Faces:</div>';
+                    data.unknown_faces.slice(0, 10).forEach(filename => {
+                        cropsHtml += `
+                            <div class="detection-item" style="padding: 5px; margin-bottom: 5px;">
+                                <div style="font-size: 0.8em;">Unknown Person</div>
+                                <div style="font-size: 0.7em; opacity: 0.7;">${filename}</div>
+                            </div>
+                        `;
+                    });
+                }
+                
+                if (cropsHtml === '') {
+                    cropsHtml = '<div style="text-align: center; opacity: 0.6; padding: 20px;">No face crops saved yet...</div>';
+                }
+                
+                faceCropsList.innerHTML = cropsHtml;
+                viewCropsBtn.innerHTML = '📸 View Face Crops';
+                updateStatus('✅ Face crops loaded successfully!', 'success');
+                
+            } catch (error) {
+                console.error('Error loading face crops:', error);
+                faceCropsList.innerHTML = '<div style="color: #f44336; padding: 10px;">Error loading face crops</div>';
+                viewCropsBtn.innerHTML = '📸 View Face Crops';
+                updateStatus('❌ Failed to load face crops', 'error');
+            }
+        });
 
         // Auto-load faces on page load
         window.addEventListener('load', () => {

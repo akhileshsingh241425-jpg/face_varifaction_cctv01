@@ -12,19 +12,23 @@ from datetime import datetime
 def create_production_database():
     """Create production database and tables"""
     
+    # Load environment variables
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     # Database configurations
     configs = {
         'testing': {
-            'host': 'localhost',
-            'user': 'root', 
-            'password': 'root',
-            'database': 'hrm_database'
+            'host': os.getenv('TEST_DB_HOST', 'localhost'),
+            'user': os.getenv('TEST_DB_USER', 'root'), 
+            'password': os.getenv('TEST_DB_PASSWORD', 'root'),
+            'database': os.getenv('TEST_DB_NAME', 'hrm_database')
         },
         'production': {
-            'host': 'localhost',
-            'user': 'root',
-            'password': 'root',  # Change this for production
-            'database': 'hrm_production'
+            'host': os.getenv('PROD_DB_HOST', 'localhost'),
+            'user': os.getenv('PROD_DB_USER', 'root'),
+            'password': os.getenv('PROD_DB_PASSWORD', 'root'),
+            'database': os.getenv('PROD_DB_NAME', 'hrm_production')
         }
     }
     
@@ -41,12 +45,18 @@ def create_production_database():
         )
         cursor = conn.cursor()
         
-        # Create database
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {configs['production']['database']}")
-        print(f"✅ Created database: {configs['production']['database']}")
+        # Just connect to existing database
+        conn.close()
         
-        # Use the database
-        cursor.execute(f"USE {configs['production']['database']}")
+        # Connect to the existing production database
+        conn = mysql.connector.connect(
+            host=configs['production']['host'],
+            user=configs['production']['user'],
+            password=configs['production']['password'],
+            database=configs['production']['database']
+        )
+        cursor = conn.cursor()
+        print(f"✅ Successfully connected to existing database: {configs['production']['database']}")
         
         # Create multi_angle_faces table
         create_table_query = """

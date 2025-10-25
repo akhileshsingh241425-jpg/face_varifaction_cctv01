@@ -623,13 +623,20 @@
                     <label>📹 Camera Type</label>
                     <select id="camera-type">
                         <option value="webcam">Webcam</option>
-                        <option value="cctv">CCTV Camera</option>
+                        <option value="cctv1">CCTV System 1 (127 Channels - Old)</option>
+                        <option value="cctv2">CCTV System 2 (128 Channels - New)</option>
+                        <option value="cctv">CCTV (Default/Auto)</option>
                     </select>
                 </div>
 
                 <div class="control-group" id="channel-group">
+                    <label>📺 CCTV Channel (1-128)</label>
+                    <input type="number" id="cctv-channel" min="1" max="128" value="1" placeholder="Enter channel (1-128)">
+                </div>
+
+                <div class="control-group" style="display: none;" id="old-channel-group">
                     <label>📺 CCTV Channel</label>
-                    <select id="cctv-channel">
+                    <select id="cctv-channel-select">
                         <option value="1">Channel 1</option>
                         <option value="2">Channel 2</option>
                         <option value="3">Channel 3</option>
@@ -804,14 +811,59 @@
                         <button id="stop-camera" class="stop-btn">Stop Camera</button>
                     </div>
                 </div>
+                
+                <!-- Multi-Camera Section -->
+                <div class="control-group" style="border-top: 2px solid rgba(255,255,255,0.2); padding-top: 15px; margin-top: 15px;">
+                    <label>🎥 Multi-Camera Mode (Up to 10 Cameras)</label>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button id="start-multi-camera" style="background: linear-gradient(45deg, #9C27B0, #E91E63);">
+                            🚀 Start Multi-Camera
+                        </button>
+                        <button id="stop-multi-camera" class="stop-btn">
+                            🛑 Stop All Cameras
+                        </button>
+                        <button id="configure-multi-camera" style="background: linear-gradient(45deg, #FF9800, #FF5722);">
+                            ⚙️ Configure Cameras
+                        </button>
+                    </div>
+                    <div id="multi-camera-status" style="margin-top: 10px; font-size: 14px; color: #4CAF50;">
+                        No cameras active
+                    </div>
+                </div>
             </div>
 
             <div class="status" id="status">
                 Ready to start face recognition system...
             </div>
         </div>
+        
+        <!-- Multi-Camera Configuration Modal -->
+        <div id="multi-camera-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; overflow-y: auto;">
+            <div style="max-width: 800px; margin: 50px auto; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 15px;">
+                <h2 style="color: white; margin-bottom: 20px;">⚙️ Configure Multi-Camera Setup</h2>
+                <p style="color: rgba(255,255,255,0.9); margin-bottom: 20px;">
+                    Select up to 10 cameras to monitor simultaneously. Each camera will run independently.
+                </p>
+                
+                <div id="camera-config-list" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 20px;">
+                    <!-- Camera config items will be added here by JavaScript -->
+                </div>
+                
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button id="add-camera-config" style="background: linear-gradient(45deg, #4CAF50, #45a049);">
+                        ➕ Add Camera
+                    </button>
+                    <button id="apply-multi-camera" style="background: linear-gradient(45deg, #2196F3, #1976D2);">
+                        ✅ Apply & Start
+                    </button>
+                    <button id="cancel-multi-camera" class="stop-btn">
+                        ❌ Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
 
-        <!-- Tab Navigation -->
+```        <!-- Tab Navigation -->
         <div class="tab-navigation">
             <button class="tab-btn active" onclick="showTab('live-feed')">📹 Live Feed</button>
             <button class="tab-btn" onclick="showTab('upload-employee')">👥 Employee Management</button>
@@ -827,6 +879,11 @@
                         <div id="video-placeholder" class="video-placeholder">
                             Select camera and click "Start Camera" to begin
                         </div>
+                    </div>
+                    
+                    <!-- Multi-Camera Grid -->
+                    <div id="multi-camera-grid" class="hidden" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-top: 20px;">
+                        <!-- Camera feeds will be added here dynamically -->
                     </div>
                 </div>
             </div>
@@ -1076,7 +1133,10 @@
 
         // Show/hide channel selection and auto-restart camera
         cameraType.addEventListener('change', async () => {
-            if (cameraType.value === 'cctv') {
+            const selectedType = cameraType.value;
+            
+            // Show channel input for CCTV systems
+            if (selectedType === 'cctv1' || selectedType === 'cctv2' || selectedType === 'cctv') {
                 channelGroup.style.display = 'flex';
             } else {
                 channelGroup.style.display = 'none';
@@ -1227,9 +1287,12 @@
             startCameraBtn.innerHTML = '<span class="loading"></span> Starting...';
             startCameraBtn.disabled = true;
 
+            const selectedCameraType = cameraType.value;
+            const channelValue = cctvChannel.value; // Get channel from input field (1-128)
+            
             const cameraData = {
-                camera_type: cameraType.value,
-                channel: cameraType.value === 'cctv' ? cctvChannel.value : null
+                camera_type: selectedCameraType,
+                channel: (selectedCameraType === 'cctv' || selectedCameraType === 'cctv1' || selectedCameraType === 'cctv2') ? channelValue : null
             };
 
             try {
@@ -2092,6 +2155,181 @@
         window.addEventListener('load', () => {
             updateStatus('🚀 System ready! Click "Load Faces" to begin.');
         });
+        
+        // ============ Multi-Camera Mode JavaScript ============
+        let multiCameraConfigs = [];
+        let multiCameraActive = false;
+        
+        // Configure multi-camera button
+        document.getElementById('configure-multi-camera').addEventListener('click', () => {
+            document.getElementById('multi-camera-modal').style.display = 'block';
+            renderCameraConfigs();
+        });
+        
+        // Cancel multi-camera config
+        document.getElementById('cancel-multi-camera').addEventListener('click', () => {
+            document.getElementById('multi-camera-modal').style.display = 'none';
+        });
+        
+        // Add camera to config
+        document.getElementById('add-camera-config').addEventListener('click', () => {
+            if (multiCameraConfigs.length >= 10) {
+                alert('Maximum 10 cameras allowed!');
+                return;
+            }
+            multiCameraConfigs.push({ type: 'cctv1', channel: 1 });
+            renderCameraConfigs();
+        });
+        
+        // Render camera configuration items
+        function renderCameraConfigs() {
+            const container = document.getElementById('camera-config-list');
+            if (multiCameraConfigs.length === 0) {
+                container.innerHTML = '<p style="color: white; grid-column: 1 / -1;">No cameras configured. Click "Add Camera" to start.</p>';
+                return;
+            }
+            
+            container.innerHTML = multiCameraConfigs.map((config, idx) => `
+                <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px;">
+                    <h4 style="color: white; margin-bottom: 10px;">📹 Camera ${idx + 1}</h4>
+                    <select onchange="updateCameraConfig(${idx}, 'type', this.value)" style="width: 100%; margin-bottom: 10px; padding: 8px; border-radius: 5px;">
+                        <option value="cctv1" ${config.type === 'cctv1' ? 'selected' : ''}>CCTV System 1</option>
+                        <option value="cctv2" ${config.type === 'cctv2' ? 'selected' : ''}>CCTV System 2</option>
+                        <option value="webcam" ${config.type === 'webcam' ? 'selected' : ''}>Webcam</option>
+                    </select>
+                    <input type="number" value="${config.channel}" onchange="updateCameraConfig(${idx}, 'channel', this.value)" 
+                           min="1" max="128" placeholder="Channel" 
+                           style="width: 100%; margin-bottom: 10px; padding: 8px; border-radius: 5px;"
+                           ${config.type === 'webcam' ? 'disabled' : ''}>
+                    <button onclick="removeCameraConfig(${idx})" style="background: #f44336; color: white; padding: 8px; border: none; border-radius: 5px; cursor: pointer; width: 100%;">
+                        🗑️ Remove
+                    </button>
+                </div>
+            `).join('');
+        }
+        
+        // Update camera config
+        window.updateCameraConfig = (idx, field, value) => {
+            multiCameraConfigs[idx][field] = field === 'channel' ? parseInt(value) : value;
+            renderCameraConfigs();
+        };
+        
+        // Remove camera config
+        window.removeCameraConfig = (idx) => {
+            multiCameraConfigs.splice(idx, 1);
+            renderCameraConfigs();
+        };
+        
+        // Apply and start multi-camera
+        document.getElementById('apply-multi-camera').addEventListener('click', async () => {
+            if (multiCameraConfigs.length === 0) {
+                alert('Please add at least one camera!');
+                return;
+            }
+            
+            document.getElementById('multi-camera-modal').style.display = 'none';
+            await startMultiCameras(multiCameraConfigs);
+        });
+        
+        // Start multi-camera mode
+        document.getElementById('start-multi-camera').addEventListener('click', async () => {
+            if (multiCameraConfigs.length === 0) {
+                // Quick start with default 10 cameras
+                multiCameraConfigs = [
+                    { type: 'cctv1', channel: 1 },
+                    { type: 'cctv1', channel: 2 },
+                    { type: 'cctv2', channel: 1 },
+                    { type: 'cctv2', channel: 2 },
+                    { type: 'cctv1', channel: 3 },
+                    { type: 'cctv1', channel: 4 },
+                    { type: 'cctv2', channel: 3 },
+                    { type: 'cctv2', channel: 4 },
+                    { type: 'cctv1', channel: 5 },
+                    { type: 'cctv1', channel: 6 }
+                ];
+            }
+            await startMultiCameras(multiCameraConfigs);
+        });
+        
+        // Stop all cameras
+        document.getElementById('stop-multi-camera').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/api/multi_cameras/stop', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    multiCameraActive = false;
+                    document.getElementById('multi-camera-grid').classList.add('hidden');
+                    document.getElementById('multi-camera-status').textContent = 'All cameras stopped';
+                    updateStatus('🛑 All cameras stopped');
+                }
+            } catch (error) {
+                console.error('Error stopping cameras:', error);
+            }
+        });
+        
+        // Start multi-cameras function
+        async function startMultiCameras(configs) {
+            try {
+                updateStatus('🚀 Starting ' + configs.length + ' cameras...');
+                
+                const response = await fetch('/api/multi_cameras/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cameras: configs })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    multiCameraActive = true;
+                    document.getElementById('multi-camera-status').textContent = 
+                        `✅ ${data.active_cameras} cameras active`;
+                    updateStatus(data.message, 'success');
+                    
+                    // Show grid and start receiving frames
+                    document.getElementById('multi-camera-grid').classList.remove('hidden');
+                    startMultiCameraStream();
+                } else {
+                    updateStatus('❌ ' + data.message, 'error');
+                }
+            } catch (error) {
+                console.error('Error starting multi-cameras:', error);
+                updateStatus('❌ Failed to start cameras', 'error');
+            }
+        }
+        
+        // Start receiving multi-camera stream
+        function startMultiCameraStream() {
+            const eventSource = new EventSource('/api/multi_cameras/frames');
+            const grid = document.getElementById('multi-camera-grid');
+            
+            eventSource.onmessage = (event) => {
+                try {
+                    const frames = JSON.parse(event.data);
+                    
+                    // Update or create camera feed elements
+                    Object.keys(frames).forEach(cameraId => {
+                        let imgElement = document.getElementById('feed-' + cameraId);
+                        if (!imgElement) {
+                            imgElement = document.createElement('img');
+                            imgElement.id = 'feed-' + cameraId;
+                            imgElement.style.cssText = 'width: 100%; height: auto; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+                            grid.appendChild(imgElement);
+                        }
+                        imgElement.src = 'data:image/jpeg;base64,' + frames[cameraId];
+                    });
+                } catch (error) {
+                    console.error('Error processing frames:', error);
+                }
+            };
+            
+            eventSource.onerror = () => {
+                console.log('Multi-camera stream closed');
+                eventSource.close();
+            };
+        }
+        
     </script>
 </body>
 </html>

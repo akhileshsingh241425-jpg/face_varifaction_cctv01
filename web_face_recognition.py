@@ -19,9 +19,20 @@ import json
 import os
 from ultralytics import YOLO
 from dotenv import load_dotenv
+import torch
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Enable GPU/CUDA if available
+USE_GPU = torch.cuda.is_available()
+if USE_GPU:
+    print(f"✅ GPU Available: {torch.cuda.get_device_name(0)}")
+    print(f"✅ CUDA Version: {torch.version.cuda}")
+    DEVICE = 'cuda'
+else:
+    print("⚠️ GPU not available, using CPU")
+    DEVICE = 'cpu'
 
 # Database Configuration
 class DatabaseConfig:
@@ -68,6 +79,14 @@ class WebFaceRecognition:
         self.db = None
         self.known_face_encodings = []
         self.known_face_names = []
+        
+        # Multi-camera support - up to 10 cameras simultaneously
+        self.max_cameras = 10
+        self.active_cameras = {}  # {camera_id: {'camera': cv2.VideoCapture, 'thread': Thread, 'active': bool}}
+        self.camera_frames = {}  # {camera_id: frame}
+        self.camera_detections = {}  # {camera_id: [detections]}
+        
+        # Legacy single camera support (for backward compatibility)
         self.current_camera = None
         self.camera_active = False
         self.current_frame = None
@@ -79,28 +98,80 @@ class WebFaceRecognition:
         self.strictness_mode = "strict"  # "normal", "strict", "very_strict"
         self.performance_stats = {"fps": 0, "cpu_usage": "Low"}
         
+        # Thread safety
+        self.frame_lock = threading.Lock()
+        self.detection_lock = threading.Lock()
+        
+        # Memory management
+        import gc
+        gc.enable()  # Enable garbage collection
+        self.frame_skip_counter = 0  # Skip frames to reduce CPU load
+        self.process_every_n_frames = 10  # Process every 10th frame (har 10वें frame पर face recognition)
+        
+        # Smart tracking system - YOLO tracking se same person ko bar-bar process nahi karenge
+        self.tracked_persons = {}  # {track_id: {'last_processed': timestamp, 'name': name, 'crop_path': path}}
+        self.person_recheck_interval = 5.0  # Same person ko 5 seconds baad dobara check karenge
+        
+        # Face crop queue - Face recognition video frame se nahi, saved crops se kaam karega
+        self.pending_crops_dir = os.path.join("face_crops", "pending_recognition")
+        os.makedirs(self.pending_crops_dir, exist_ok=True)
+        
         # Create face crops directories
         self.face_crops_dir = "face_crops"
         self.detected_faces_dir = os.path.join(self.face_crops_dir, "detected_faces")
         self.unknown_faces_dir = os.path.join(self.face_crops_dir, "unknown_faces")
         
-        # Initialize YOLO model for human detection
+        # Initialize YOLO model for human detection with GPU
         try:
-            self.yolo_model = YOLO('yolov8n.pt')  # Load YOLOv8 nano model
-            logger.info("✅ YOLO model loaded successfully")
+            self.yolo_model = YOLO('yolov8n.pt')
+            if USE_GPU:
+                self.yolo_model.to(DEVICE)
+                logger.info(f"✅ YOLO model loaded on GPU: {torch.cuda.get_device_name(0)}")
+            else:
+                logger.info("✅ YOLO model loaded on CPU")
         except Exception as e:
             logger.error(f"❌ Failed to load YOLO model: {e}")
             self.yolo_model = None
         
+        # Start background face recognition worker thread
+        self.recognition_worker = threading.Thread(
+            target=self.process_saved_face_crops,
+            daemon=True,
+            name="FaceRecognitionWorker"
+        )
+        self.recognition_worker.start()
+        logger.info("✅ Face recognition background worker started")
+        
     def connect_database(self):
-        """Connect to MySQL database"""
+        """Connect to MySQL database with auto-reconnect"""
         try:
-            self.db = mysql.connector.connect(**db_config)
+            self.db = mysql.connector.connect(**db_config, autocommit=True)
             logger.info(f"✅ Database connected - {environment_info} ({db_config['database']})")
             return True
         except Exception as e:
             logger.error(f"❌ Database connection failed: {e}")
             return False
+    
+    def ensure_db_connection(self):
+        """Ensure database connection is alive, reconnect if needed"""
+        try:
+            if self.db is None:
+                logger.warning("Database connection is None, reconnecting...")
+                return self.connect_database()
+            
+            # Check if connection is alive
+            if not self.db.is_connected():
+                logger.warning("Database connection lost, reconnecting...")
+                try:
+                    self.db.ping(reconnect=True, attempts=3, delay=1)
+                    logger.info("✅ Database reconnected successfully")
+                except:
+                    # If ping fails, create new connection
+                    return self.connect_database()
+            return True
+        except Exception as e:
+            logger.error(f"Error ensuring database connection: {e}")
+            return self.connect_database()
     
     def calculate_encoding_quality(self, encoding):
         """Calculate dynamic encoding quality with realistic variation"""
@@ -285,7 +356,7 @@ class WebFaceRecognition:
             return None
     
     def log_detection(self, employee_name, camera_source):
-        """Log face detection to database"""
+        """Log face detection to database - skip if table doesn't exist"""
         try:
             if not self.db:
                 self.connect_database()
@@ -297,17 +368,35 @@ class WebFaceRecognition:
             """, (1, employee_name, 1, camera_source, 'entry'))
             self.db.commit()
         except Exception as e:
-            logger.error(f"Error logging detection: {e}")
+            # Silently ignore database errors (table might not exist)
+            pass
     
     def get_camera_source(self, camera_type, channel=None):
-        """Get camera source URL - EXTERNAL WEBCAM ONLY"""
+        """Get camera source URL - EXTERNAL WEBCAM ONLY or 2 CCTV Systems"""
         if camera_type == "webcam":
             # Force external USB camera only
             camera_index = self.detect_best_camera()
             return camera_index, "External USB Webcam"
-        elif camera_type == "cctv" and channel:
+        
+        elif camera_type == "cctv1" and channel:
+            # CCTV System 1 - पहला system (127 channels पहले से चल रहा)
+            # Port: 8554, Password: cctv%4321 (literally, not URL encoded)
+            # So we need to encode % as %25, making it: cctv%254321
             cctv_url = f"rtsp://cctv1:cctv%254321@160.191.137.18:8554/cam/realmonitor?channel={channel}&subtype=0"
-            return cctv_url, f"CCTV Channel {channel}"
+            return cctv_url, f"CCTV1 Channel {channel}"
+        
+        elif camera_type == "cctv2" and channel:
+            # CCTV System 2 - नया system (128 नए channels)
+            # Port: 554, Password: cctv%4321 (literally, not URL encoded)
+            # So we need to encode % as %25, making it: cctv%254321
+            cctv_url = f"rtsp://cctv1:cctv%254321@160.191.137.18:554/cam/realmonitor?channel={channel}&subtype=0"
+            return cctv_url, f"CCTV2 Channel {channel}"
+        
+        elif camera_type == "cctv" and channel:
+            # Backward compatibility - default to CCTV1
+            cctv_url = f"rtsp://cctv1:cctv%254321@160.191.137.18:8554/cam/realmonitor?channel={channel}&subtype=0"
+            return cctv_url, f"CCTV1 Channel {channel}"
+        
         else:
             # Default to external webcam if invalid configuration
             logger.warning(f"Invalid camera configuration: {camera_type}, {channel}. Using external webcam.")
@@ -387,10 +476,24 @@ class WebFaceRecognition:
             # Simple camera initialization
             self.current_camera = cv2.VideoCapture(camera_source)
             
-            # Basic setup
+            # Aggressive RTSP optimizations to reduce lag
             if isinstance(camera_source, str) and camera_source.startswith('rtsp://'):
-                # RTSP optimizations
+                logger.info("🔧 Applying RTSP optimizations for smooth playback...")
+                
+                # Critical: Buffer size = 1 (latest frame only, discard old frames)
                 self.current_camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                
+                # Use GPU decoding if available (reduces CPU load)
+                self.current_camera.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                
+                # Set lower resolution for faster processing (optional)
+                # self.current_camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                # self.current_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                
+                # Reduce FPS expectation (we don't need 25fps, 10fps is enough)
+                self.current_camera.set(cv2.CAP_PROP_FPS, 10)
+                
+                logger.info("✅ RTSP optimizations applied")
             
             # Check if camera opened
             if not self.current_camera.isOpened():
@@ -435,6 +538,185 @@ class WebFaceRecognition:
         self.last_detection = {}
         
         logger.info("🛑 Camera stopped")
+    
+    def start_multi_cameras(self, camera_configs):
+        """Start multiple cameras simultaneously (up to 10)
+        camera_configs: List of dicts [{'type': 'cctv1', 'channel': 1}, ...]
+        """
+        if len(camera_configs) > self.max_cameras:
+            return False, f"Maximum {self.max_cameras} cameras allowed"
+        
+        started_cameras = []
+        for idx, config in enumerate(camera_configs):
+            camera_id = f"cam_{idx}"
+            camera_type = config.get('type')
+            channel = config.get('channel')
+            
+            camera_source, camera_name = self.get_camera_source(camera_type, channel)
+            if camera_source is None:
+                logger.error(f"Invalid camera config: {config}")
+                continue
+            
+            # Initialize camera
+            camera = cv2.VideoCapture(camera_source)
+            
+            # RTSP optimizations
+            if isinstance(camera_source, str) and camera_source.startswith('rtsp://'):
+                camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                camera.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                camera.set(cv2.CAP_PROP_FPS, 10)
+            
+            if not camera.isOpened():
+                logger.error(f"Failed to open camera: {camera_name}")
+                continue
+            
+            # Store camera info
+            self.active_cameras[camera_id] = {
+                'camera': camera,
+                'name': camera_name,
+                'active': True,
+                'thread': None
+            }
+            
+            # Start processing thread for this camera
+            thread = threading.Thread(
+                target=self.process_camera_stream,
+                args=(camera_id,),
+                daemon=True,
+                name=f"Camera{idx}Thread"
+            )
+            thread.start()
+            self.active_cameras[camera_id]['thread'] = thread
+            
+            started_cameras.append(camera_name)
+            logger.info(f"✅ Started camera {idx+1}: {camera_name}")
+        
+        if len(started_cameras) > 0:
+            return True, f"Started {len(started_cameras)} cameras: {', '.join(started_cameras)}"
+        else:
+            return False, "No cameras could be started"
+    
+    def stop_multi_cameras(self):
+        """Stop all active cameras"""
+        for camera_id, cam_info in list(self.active_cameras.items()):
+            cam_info['active'] = False
+            if cam_info['camera']:
+                try:
+                    cam_info['camera'].release()
+                except:
+                    pass
+        
+        self.active_cameras.clear()
+        self.camera_frames.clear()
+        self.camera_detections.clear()
+        logger.info("🛑 All cameras stopped")
+        return True, "All cameras stopped"
+    
+    def process_camera_stream(self, camera_id):
+        """Process frames from a single camera (runs in separate thread)"""
+        cam_info = self.active_cameras.get(camera_id)
+        if not cam_info:
+            return
+        
+        camera = cam_info['camera']
+        
+        while cam_info['active']:
+            try:
+                # Read multiple frames to get latest (reduce lag)
+                frame = None
+                for _ in range(3):
+                    ret, frame = camera.read()
+                    if not ret or frame is None:
+                        continue
+                
+                if frame is None:
+                    time.sleep(0.1)
+                    continue
+                
+                # Store frame
+                self.camera_frames[camera_id] = frame
+                
+                # Process with YOLO + Face Recognition (same as single camera)
+                detections = self.process_frame_for_camera(frame, camera_id)
+                self.camera_detections[camera_id] = detections
+                
+                time.sleep(0.05)  # ~20 FPS
+                
+            except Exception as e:
+                logger.error(f"Error processing camera {camera_id}: {e}")
+                time.sleep(1)
+        
+        logger.info(f"Camera {camera_id} processing thread stopped")
+    
+    def process_frame_for_camera(self, frame, camera_id):
+        """Process a single frame (YOLO + Face Recognition) for multi-camera"""
+        try:
+            if frame is None or frame.size == 0:
+                return []
+            
+            frame = np.ascontiguousarray(frame)
+            detections = []
+            current_time = time.time()
+            
+            # YOLO human detection
+            human_boxes = self.detect_humans_yolo(frame)
+            
+            if len(human_boxes) == 0:
+                return []
+            
+            # Process detected humans (similar to single camera logic)
+            for track_id, x1, y1, x2, y2 in human_boxes[:3]:  # Limit to 3 per camera
+                # Create unique track ID per camera
+                unique_track_id = f"{camera_id}_{track_id}"
+                
+                # Check if should process
+                should_process = False
+                if unique_track_id not in self.tracked_persons:
+                    should_process = True
+                    self.tracked_persons[unique_track_id] = {
+                        'last_processed': 0,
+                        'name': 'Unknown',
+                        'crop_path': None
+                    }
+                else:
+                    last_processed = self.tracked_persons[unique_track_id]['last_processed']
+                    if (current_time - last_processed) > self.person_recheck_interval:
+                        should_process = True
+                
+                if should_process:
+                    # Save crop for background recognition
+                    padding = 20
+                    x1 = max(0, x1 - padding)
+                    y1 = max(0, y1 - padding)
+                    x2 = min(frame.shape[1], x2 + padding)
+                    y2 = min(frame.shape[0], y2 + padding)
+                    
+                    human_crop = frame[y1:y2, x1:x2]
+                    if human_crop.size > 0:
+                        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                        crop_filename = f"track_{unique_track_id}_{timestamp_str}.jpg"
+                        crop_path = os.path.join(self.pending_crops_dir, crop_filename)
+                        cv2.imwrite(crop_path, human_crop)
+                        
+                        self.tracked_persons[unique_track_id]['last_processed'] = current_time
+                        self.tracked_persons[unique_track_id]['crop_path'] = crop_path
+                
+                # Get cached name
+                cached_name = self.tracked_persons.get(unique_track_id, {}).get('name', 'Processing...')
+                detections.append({
+                    'name': cached_name,
+                    'confidence': 0,
+                    'box': (x1, y1, x2, y2),
+                    'timestamp': current_time,
+                    'track_id': unique_track_id,
+                    'cached': True
+                })
+            
+            return detections
+            
+        except Exception as e:
+            logger.error(f"Frame processing error for {camera_id}: {e}")
+            return []
     
     def optimize_camera_settings(self):
         """Optimize camera settings based on detection mode"""
@@ -509,24 +791,28 @@ class WebFaceRecognition:
             return frame
     
     def detect_humans_yolo(self, frame):
-        """Use YOLO to detect human bodies first"""
+        """Use YOLO with TRACKING to detect human bodies - GPU accelerated
+        Returns: List of tuples (track_id, x1, y1, x2, y2)
+        """
         if not self.yolo_model:
             return []
         
         try:
-            # Run YOLO detection
-            results = self.yolo_model(frame, verbose=False)
+            # Run YOLO detection with tracking on GPU
+            # track() method automatically assigns IDs to detected persons
+            results = self.yolo_model.track(frame, persist=True, verbose=False, device=DEVICE)
             human_boxes = []
             
             for r in results:
                 boxes = r.boxes
-                if boxes is not None:
-                    for box in boxes:
+                if boxes is not None and boxes.id is not None:
+                    for box, track_id in zip(boxes, boxes.id):
                         # Class 0 is 'person' in COCO dataset
                         if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:
                             # Get bounding box coordinates
                             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            human_boxes.append((int(x1), int(y1), int(x2), int(y2)))
+                            track_id = int(track_id.cpu().numpy())
+                            human_boxes.append((track_id, int(x1), int(y1), int(x2), int(y2)))
             
             return human_boxes
         except Exception as e:
@@ -534,366 +820,317 @@ class WebFaceRecognition:
             return []
     
     def process_frame(self):
-        """Process current frame with dual detection mode"""
+        """Smart frame processing with RTSP lag reduction:
+        1. Skip old buffered frames to get latest frame (reduces lag)
+        2. YOLO detects humans with tracking IDs (GPU)
+        3. For NEW or OLD tracked persons, save face crop to file
+        4. Face recognition works SEPARATELY on saved files, not on video frames
+        """
         if not self.current_camera or not self.camera_active:
             return None, []
         
-        ret, frame = self.current_camera.read()
-        if not ret or frame is None:
+        # CRITICAL: For RTSP streams, clear buffer by reading multiple times
+        # This ensures we get the LATEST frame, not old buffered frames
+        frame = None
+        for _ in range(3):  # Read 3 times to skip old frames
+            ret, frame = self.current_camera.read()
+            if not ret or frame is None:
+                continue
+        
+        if frame is None:
             return None, []
         
         try:
-            # Ensure frame is valid and contiguous
+            # Ensure frame is valid
             if len(frame.shape) != 3 or frame.size == 0:
                 return frame, []
                 
             frame = np.ascontiguousarray(frame)
-            start_time = time.time()
+            detections = []
+            current_time = time.time()
             
-            # Apply image enhancement for optimized mode
-            enhanced_frame = self.enhance_image(frame)
-        except Exception as e:
-            logger.error(f"Frame processing error: {e}")
-            return frame, []
-        
-        detections = []
-        
-        # Choose detection method based on mode
-        if self.detection_mode == "optimized":
-            # Use CNN model with better settings for optimized mode
-            scale_factor = 0.5  # Better quality
-            model_type = "cnn"  # More accurate model
-            upsample_times = 2  # Detect smaller faces
-        else:
-            # Use HOG model with faster settings for normal mode  
-            scale_factor = 0.25  # Faster processing
-            model_type = "hog"  # Faster model
-            upsample_times = 1  # Standard detection
-        
-        # Resize frame based on mode
-        small_frame = cv2.resize(enhanced_frame, (0, 0), fx=scale_factor, fy=scale_factor)
-        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-        
-        # Find faces with mode-specific settings
-        face_locations = face_recognition.face_locations(
-            rgb_small_frame, 
-            number_of_times_to_upsample=upsample_times,
-            model=model_type
-        )
-        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
-        
-        logger.info(f"🔍 Found {len(face_locations)} faces in frame")
-        
-        for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-            # Scale back up based on scale factor
-            scale_back = int(1 / scale_factor)
-            top *= scale_back
-            right *= scale_back
-            bottom *= scale_back
-            left *= scale_back
+            # Step 1: YOLO detects humans with tracking IDs (GPU accelerated)
+            human_boxes = self.detect_humans_yolo(frame)
             
-            # Face quality check - reject small or low quality faces
-            face_width = right - left
-            face_height = bottom - top
-            face_area = face_width * face_height
+            # Only log occasionally to reduce console spam
+            if len(human_boxes) > 0 and int(current_time) % 5 == 0:
+                logger.info(f"🤖 YOLO found {len(human_boxes)} tracked persons")
             
-            # Minimum face size check
-            if face_area < 2500:  # Minimum 50x50 pixels
-                logger.info(f"⚠️ Face too small ({face_width}x{face_height}) - skipping")
-                continue
+            if len(human_boxes) == 0:
+                return frame, []
+            
+            # Step 2: Smart processing - Only process NEW persons or persons after interval
+            for track_id, x1, y1, x2, y2 in human_boxes:
+                # Check if we should process this tracked person
+                should_process = False
                 
-            # Extract face region for quality check
-            face_region = enhanced_frame[top:bottom, left:right]
-            if face_region.size == 0:
-                continue
+                if track_id not in self.tracked_persons:
+                    # New person detected!
+                    logger.info(f"🆕 New person detected: Track ID {track_id}")
+                    should_process = True
+                    self.tracked_persons[track_id] = {
+                        'last_processed': 0,
+                        'name': 'Unknown',
+                        'crop_path': None
+                    }
+                else:
+                    # Check if enough time passed since last processing
+                    last_processed = self.tracked_persons[track_id]['last_processed']
+                    if (current_time - last_processed) > self.person_recheck_interval:
+                        logger.info(f"� Re-checking person: Track ID {track_id}")
+                        should_process = True
                 
-            # Relaxed blur detection - external camera might be lower quality
-            try:
-                gray_face = cv2.cvtColor(face_region, cv2.COLOR_BGR2GRAY)
-                blur_score = cv2.Laplacian(gray_face, cv2.CV_64F).var()
-                
-                # Optimized for external USB cameras - very lenient blur threshold
-                blur_threshold = 15  # Very low threshold since we only use external cameras
-                if blur_score < blur_threshold:
-                    logger.info(f"⚠️ Face too blurry (blur score: {blur_score:.1f}) - skipping")
+                if not should_process:
+                    # Skip this person, use cached name
+                    cached_name = self.tracked_persons[track_id].get('name', 'Unknown')
+                    detections.append({
+                        'name': cached_name,
+                        'confidence': 0,  # Cached, no new confidence
+                        'box': (x1, y1, x2, y2),
+                        'timestamp': current_time,
+                        'track_id': track_id,
+                        'cached': True
+                    })
                     continue
-            except Exception as e:
-                logger.warning(f"Blur detection failed: {e} - accepting face")
-                # If blur detection fails, accept the face
-            
-            # Compare with known faces using stricter tolerance
-            # Use tolerance based on detection mode for better accuracy
-            tolerance = 0.45 if self.detection_mode == "optimized" else 0.50
-            matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=tolerance)
-            name = "Unknown"
-            confidence = 0
-            
-            if True in matches:
-                face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
-                best_match_index = np.argmin(face_distances)
-                best_distance = face_distances[best_match_index]
                 
-                # Dynamic thresholds based on user settings
-                if self.strictness_mode == "very_strict":
-                    base_threshold = 0.40
-                elif self.strictness_mode == "strict":
-                    base_threshold = 0.45
-                else:  # normal
-                    base_threshold = 0.50
-                    
-                # Adjust for detection mode
-                if self.detection_mode == "optimized":
-                    confidence_threshold = base_threshold - 0.02  # Slightly more strict
-                else:
-                    confidence_threshold = base_threshold
-                    
-                min_confidence_percent = self.confidence_threshold  # User-set value
+                # Step 3: Crop and SAVE face image to file
+                padding = 20
+                x1 = max(0, x1 - padding)
+                y1 = max(0, y1 - padding)
+                x2 = min(frame.shape[1], x2 + padding)
+                y2 = min(frame.shape[0], y2 + padding)
                 
-                if matches[best_match_index] and best_distance < confidence_threshold:
-                    # More dynamic confidence calculation based on actual face recognition metrics
-                    base_confidence = (1 - best_distance) * 100
-                    
-                    # Factor 1: Face distance quality (primary factor)
-                    if best_distance < 0.3:  # Very good match
-                        distance_multiplier = 1.15
-                    elif best_distance < 0.4:  # Good match  
-                        distance_multiplier = 1.05
-                    elif best_distance < 0.5:  # Average match
-                        distance_multiplier = 0.95
-                    else:  # Poor match
-                        distance_multiplier = 0.85
-                    
-                    # Factor 2: Face size and clarity
-                    face_width = right - left
-                    face_height = bottom - top
-                    face_area = face_width * face_height
-                    
-                    if face_area > 12000:  # Large clear face
-                        size_bonus = 8
-                    elif face_area > 8000:  # Medium face
-                        size_bonus = 3
-                    elif face_area > 4000:  # Small face
-                        size_bonus = -2
-                    else:  # Very small face
-                        size_bonus = -8
-                    
-                    # Factor 3: Face position and angle quality
-                    frame_center_x = enhanced_frame.shape[1] // 2 if enhanced_frame is not None else 320
-                    frame_center_y = enhanced_frame.shape[0] // 2 if enhanced_frame is not None else 240
-                    face_center_x = (left + right) // 2
-                    face_center_y = (top + bottom) // 2
-                    
-                    # Check if face is well-positioned (not at edges)
-                    if (face_center_x > frame_center_x * 0.3 and face_center_x < frame_center_x * 1.7 and
-                        face_center_y > frame_center_y * 0.2 and face_center_y < frame_center_y * 1.5):
-                        position_bonus = 2
-                    else:
-                        position_bonus = -3
-                    
-                    # Factor 4: Add realistic variation based on time and detection history
-                    import random
-                    import time as time_module
-                    
-                    # Use time-based seed for consistent but varying results
-                    random.seed(int(time_module.time() * 10) % 1000)
-                    time_variation = random.uniform(-4, 4)
-                    
-                    # Final confidence calculation
-                    confidence = (base_confidence * distance_multiplier) + size_bonus + position_bonus + time_variation
-                    
-                    # Ensure realistic range based on distance quality
-                    if best_distance < 0.25:  # Excellent match
-                        confidence = round(max(78, min(96, confidence)), 1)
-                    elif best_distance < 0.35:  # Good match
-                        confidence = round(max(68, min(88, confidence)), 1)  
-                    elif best_distance < 0.45:  # Average match
-                        confidence = round(max(58, min(78, confidence)), 1)
-                    else:  # Poor match
-                        confidence = round(max(45, min(68, confidence)), 1)
-                    
-                    # Additional verification - only accept high confidence matches
-                    if confidence >= min_confidence_percent:
-                        name = self.known_face_names[best_match_index]
-                        
-                        # Log detection
-                        current_time = time.time()
-                        if name not in self.last_detection or (current_time - self.last_detection[name]) > 5:
-                            self.log_detection(name, self.camera_name)
-                            self.last_detection[name] = current_time
-                            logger.info(f"✅ Detected: {name} with {confidence}% confidence (distance: {best_distance:.3f})")
-                    else:
-                        # Low confidence - treat as unknown
-                        name = "Low_Confidence"
-                        logger.info(f"⚠️ Low confidence match: {self.known_face_names[best_match_index]} ({confidence}%) - marked as unknown")
-                else:
-                    # No good match found
-                    if best_distance < 0.8:  # Close but not confident enough
-                        possible_name = self.known_face_names[best_match_index]
-                        # Calculate low confidence more accurately
-                        base_confidence = (1 - best_distance) * 100
-                        confidence = round(max(40, min(65, base_confidence)), 1)  # Low confidence range
-                        logger.info(f"🤔 Possible match: {possible_name} ({confidence}%) but below threshold")
+                human_crop = frame[y1:y2, x1:x2]
+                
+                if human_crop.size == 0:
+                    continue
+                
+                # Save crop to file
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                crop_filename = f"track_{track_id}_{timestamp_str}.jpg"
+                crop_path = os.path.join(self.pending_crops_dir, crop_filename)
+                cv2.imwrite(crop_path, human_crop)
+                
+                # Update tracked person info
+                self.tracked_persons[track_id]['last_processed'] = current_time
+                self.tracked_persons[track_id]['crop_path'] = crop_path
+                
+                logger.info(f"💾 Saved crop for Track ID {track_id}: {crop_filename}")
+                
+                # Add to detections with pending status
+                detections.append({
+                    'name': 'Processing...',
+                    'confidence': 0,
+                    'box': (x1, y1, x2, y2),
+                    'timestamp': current_time,
+                    'track_id': track_id,
+                    'crop_path': crop_path,
+                    'cached': False
+                })
             
-            # Save face crop for every detection
-            face_box = [left, top, right, bottom]
-            crop_path = self.save_face_crop(frame, face_box, name, confidence)
-            if crop_path:
-                logger.info(f"💾 Face crop saved: {crop_path}")
+            # Force garbage collection
+            import gc
+            gc.collect()
             
-            # Draw on frame
-            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-            cv2.putText(frame, f"{name} ({confidence}%)", (left + 6, bottom - 6), 
-                       cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+            return frame, detections
             
-            detections.append({
-                'name': name,
-                'confidence': confidence,
-                'location': [left, top, right, bottom]
-            })
+        except Exception as e:
+            logger.error(f"Frame processing error: {str(e)}")
+            import gc
+            gc.collect()  # Clean up on error too
+            return frame, []
+    
+    def process_saved_face_crops(self):
+        """Background worker: Process saved face crops for recognition
+        यह method video frame से independent है - सिर्फ saved files को process करता है
+        """
+        logger.info("🚀 Started face recognition worker thread")
         
-        # Optional: Try YOLO if available and no faces found with traditional method
-        if len(detections) == 0 and self.yolo_model:
-            logger.info("🤖 No faces found with traditional method, trying YOLO...")
+        while True:
+            crop_path = None  # Initialize to track current file
             try:
-                human_boxes = self.detect_humans_yolo(frame)
-                logger.info(f"🤖 YOLO found {len(human_boxes)} human bodies")
+                # Check for pending crop files
+                crop_files = [f for f in os.listdir(self.pending_crops_dir) if f.endswith('.jpg')]
                 
-                # Process each detected human area
-                for (x1, y1, x2, y2) in human_boxes:
-                    # Draw YOLO detection box
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 1)  # Blue box for human detection
+                if len(crop_files) == 0:
+                    time.sleep(0.5)  # Wait if no files
+                    continue
+                
+                # Process one crop file at a time
+                for crop_filename in crop_files[:1]:  # Process only 1 at a time to avoid memory issues
+                    crop_path = os.path.join(self.pending_crops_dir, crop_filename)
                     
-                    # Crop human region for face detection
-                    human_crop = frame[y1:y2, x1:x2]
-                    if human_crop.size == 0:
+                    # Check if file still exists (might have been processed by another iteration)
+                    if not os.path.exists(crop_path):
                         continue
                     
-                    # Focus on upper part of body for face
-                    height, width = human_crop.shape[:2]
-                    face_area = human_crop[0:int(height*0.4), :]  # Top 40% of human body
-                    
-                    if face_area.size == 0:
+                    # Extract track_id from filename
+                    try:
+                        track_id = int(crop_filename.split('_')[1])
+                    except:
+                        logger.error(f"Could not parse track_id from {crop_filename}")
+                        try:
+                            os.remove(crop_path)  # Remove invalid file
+                        except:
+                            pass
                         continue
                     
-                    # Process face area
-                    small_face_area = cv2.resize(face_area, (0, 0), fx=0.5, fy=0.5)
-                    rgb_small_face = cv2.cvtColor(small_face_area, cv2.COLOR_BGR2RGB)
+                    logger.info(f"🔍 Processing saved crop: {crop_filename}")
                     
-                    face_locations = face_recognition.face_locations(rgb_small_face)
-                    face_encodings = face_recognition.face_encodings(rgb_small_face, face_locations)
+                    # Load image from file
+                    crop_image = cv2.imread(crop_path)
+                    if crop_image is None:
+                        logger.error(f"Could not load image: {crop_path}")
+                        os.remove(crop_path)
+                        continue
                     
-                    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-                        # Scale back to original coordinates
-                        top = int(top * 2) + y1
-                        right = int(right * 2) + x1
-                        bottom = int(bottom * 2) + y1
-                        left = int(left * 2) + x1
+                    # Convert to RGB
+                    rgb_crop = cv2.cvtColor(crop_image, cv2.COLOR_BGR2RGB)
+                    
+                    # Find faces in crop
+                    face_locations = face_recognition.face_locations(rgb_crop, model="hog")
+                    
+                    if len(face_locations) == 0:
+                        logger.warning(f"No face found in {crop_filename}")
+                        # Check if track_id still exists before updating
+                        if track_id in self.tracked_persons:
+                            self.tracked_persons[track_id]['name'] = 'No Face'
+                        os.remove(crop_path)  # Delete processed file
+                        continue
+                    
+                    # Get face encodings
+                    face_encodings = face_recognition.face_encodings(rgb_crop, face_locations)
+                    
+                    if len(face_encodings) == 0:
+                        logger.warning(f"No face encoding in {crop_filename}")
+                        # Check if track_id still exists before updating
+                        if track_id in self.tracked_persons:
+                            self.tracked_persons[track_id]['name'] = 'Unknown'
+                        os.remove(crop_path)
+                        continue
+                    
+                    # Take first face only
+                    face_encoding = face_encodings[0]
+                    
+                    # Compare with known faces
+                    matches = face_recognition.compare_faces(
+                        self.known_face_encodings, 
+                        face_encoding, 
+                        tolerance=0.50
+                    )
+                    
+                    name = "Unknown"
+                    confidence = 0
+                    
+                    if True in matches:
+                        face_distances = face_recognition.face_distance(
+                            self.known_face_encodings, 
+                            face_encoding
+                        )
+                        best_match_index = np.argmin(face_distances)
+                        best_distance = face_distances[best_match_index]
                         
-                        # Face recognition
-                        matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding)
-                        name = "Unknown"
-                        confidence = 0
-                        
-                        if True in matches:
-                            face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
-                            best_match_index = np.argmin(face_distances)
+                        if matches[best_match_index]:
+                            name = self.known_face_names[best_match_index]
+                            confidence = round((1 - best_distance) * 100, 1)
+                            logger.info(f"✅ Recognized Track ID {track_id}: {name} ({confidence}%)")
                             
-                            if matches[best_match_index] and face_distances[best_match_index] < 0.6:
-                                name = self.known_face_names[best_match_index]
-                                
-                                # Dynamic confidence for video processing
-                                distance = face_distances[best_match_index]
-                                base_confidence = (1 - distance) * 100
-                                
-                                # Video quality factors
-                                face_width = right - left
-                                face_height = bottom - top
-                                face_area = face_width * face_height
-                                
-                                # Distance-based confidence ranges for video
-                                if distance < 0.25:  # Very good video match
-                                    conf_range = (82, 94)
-                                    quality_bonus = 5
-                                elif distance < 0.35:  # Good video match
-                                    conf_range = (72, 86) 
-                                    quality_bonus = 2
-                                elif distance < 0.45:  # Fair video match
-                                    conf_range = (62, 78)
-                                    quality_bonus = 0
-                                else:  # Poor video match
-                                    conf_range = (50, 70)
-                                    quality_bonus = -3
-                                
-                                # Face size impact on video confidence
-                                if face_area > 10000:
-                                    size_bonus = 4
-                                elif face_area > 6000:
-                                    size_bonus = 1
-                                else:
-                                    size_bonus = -2
-                                
-                                # Time-based realistic variation for video
-                                import random
-                                import time as time_module
-                                random.seed(int(time_module.time() * 5 + hash(name)) % 1000)
-                                variation = random.uniform(-3, 3)
-                                
-                                # Calculate final confidence
-                                confidence = base_confidence + quality_bonus + size_bonus + variation
-                                confidence = round(max(conf_range[0], min(conf_range[1], confidence)), 1)
-                                
-                                # Log detection
-                                current_time = time.time()
-                                if name not in self.last_detection or (current_time - self.last_detection[name]) > 5:
-                                    self.log_detection(name, self.camera_name)
-                                    self.last_detection[name] = current_time
+                            # Log detection
+                            self.log_detection(name, self.camera_name)
+                    
+                    # Update tracked person info (only if track still exists)
+                    if track_id in self.tracked_persons:
+                        self.tracked_persons[track_id]['name'] = name
+                    else:
+                        logger.info(f"Track ID {track_id} no longer active, but recognition completed: {name}")
+                    
+                    # Move crop to appropriate folder
+                    try:
+                        if name != "Unknown":
+                            # Save to detected_faces
+                            final_filename = f"{name.replace(' ', '_')}_{confidence}pct_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+                            final_path = os.path.join(self.detected_faces_dir, final_filename)
+                        else:
+                            # Save to unknown_faces
+                            final_filename = f"unknown_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+                            final_path = os.path.join(self.unknown_faces_dir, final_filename)
                         
-                        # Save face crop
-                        face_box = [left, top, right, bottom]
-                        crop_path = self.save_face_crop(frame, face_box, name, confidence)
-                        if crop_path:
-                            logger.info(f"💾 YOLO Face crop saved: {crop_path}")
+                        # Use shutil.move instead of os.rename (more reliable)
+                        import shutil
+                        shutil.move(crop_path, final_path)
+                        logger.info(f"💾 Moved crop to: {final_path}")
                         
-                        # Draw face detection
-                        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-                        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-                        cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-                        cv2.putText(frame, f"{name} ({confidence}%)", (left + 6, bottom - 6), 
-                                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
-                        
-                        detections.append({
-                            'name': name,
-                            'confidence': confidence,
-                            'location': [left, top, right, bottom]
-                        })
+                    except Exception as move_error:
+                        logger.error(f"Failed to move file {crop_path}: {move_error}")
+                        # If move fails, just delete the original file to prevent reprocessing
+                        try:
+                            os.remove(crop_path)
+                            logger.info(f"🗑️ Deleted crop after processing: {crop_filename}")
+                        except:
+                            pass
+                    
+                    # Clean up memory
+                    del crop_image
+                    del rgb_crop
+                    del face_locations
+                    del face_encodings
+                    import gc
+                    gc.collect()
+                    
+                    # Small delay between processing
+                    time.sleep(0.1)
+                    
             except Exception as e:
-                logger.error(f"YOLO processing error: {e}")
+                logger.error(f"Error in face recognition worker: {e}")
+                logger.exception("Full traceback:")  # This will print full error details
+                
+                # Critical: Delete the problematic file to prevent infinite loop
+                if crop_path and os.path.exists(crop_path):
+                    try:
+                        os.remove(crop_path)
+                        logger.warning(f"🗑️ Deleted problematic file to prevent reprocessing: {crop_path}")
+                    except Exception as del_error:
+                        logger.error(f"Could not delete file: {del_error}")
+                
+                time.sleep(1)
+    
+    def draw_detections(self, frame, detections):
+        """Draw detection boxes and labels on frame"""
+        for detection in detections:
+            name = detection.get('name', 'Unknown')
+            confidence = detection.get('confidence', 0)
+            box = detection.get('box', None)
+            track_id = detection.get('track_id', None)
+            is_cached = detection.get('cached', False)
+            
+            if box is None:
+                continue
+            
+            left, top, right, bottom = box
+            
+            # Color based on status
+            if is_cached:
+                color = (128, 128, 128)  # Gray for cached
+            elif name == "Unknown" or name == "Processing...":
+                color = (0, 0, 255)  # Red
+            else:
+                color = (0, 255, 0)  # Green for recognized
+            
+            # Draw box
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            
+            # Draw label background
+            label = f"{name}"
+            if confidence > 0:
+                label += f" ({confidence}%)"
+            if track_id is not None:
+                label += f" [ID:{track_id}]"
+            
+            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+            cv2.putText(frame, label, (left + 6, bottom - 6), 
+                       cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 1)
         
-        # Calculate performance stats
-        end_time = time.time()
-        processing_time = end_time - start_time
-        fps = round(1.0 / processing_time if processing_time > 0 else 0, 1)
-        
-        # Update performance stats
-        self.performance_stats["fps"] = fps
-        cpu_usage = "High" if self.detection_mode == "optimized" else "Low"
-        self.performance_stats["cpu_usage"] = cpu_usage
-        
-        # Add camera info and performance stats
-        cv2.putText(frame, f"Camera: {self.camera_name}", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"Mode: {self.detection_mode.title()}", (10, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(frame, f"FPS: {fps}", (10, 90), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        cv2.putText(frame, f"Employees: {len(self.known_face_encodings)}", (10, 120), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"Faces: {len(detections)}", (10, 150), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        
-        return frame, detections
+        return frame
 
 # Global face recognition instance
 face_recognizer = WebFaceRecognition()
@@ -935,16 +1172,122 @@ def stop_camera():
         'message': 'Camera stopped'
     })
 
-@app.route('/api/camera_frame')
-def camera_frame():
-    """Get current camera frame"""
+@app.route('/api/multi_cameras/start', methods=['POST'])
+def start_multi_cameras():
+    """Start multiple cameras simultaneously"""
+    try:
+        data = request.get_json()
+        camera_configs = data.get('cameras', [])
+        
+        if not camera_configs:
+            return jsonify({'success': False, 'message': 'No camera configurations provided'})
+        
+        success, message = face_recognizer.start_multi_cameras(camera_configs)
+        return jsonify({
+            'success': success,
+            'message': message,
+            'active_cameras': len(face_recognizer.active_cameras)
+        })
+    except Exception as e:
+        logger.error(f"Error starting multi-cameras: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/multi_cameras/stop', methods=['POST'])
+def stop_multi_cameras():
+    """Stop all active cameras"""
+    try:
+        success, message = face_recognizer.stop_multi_cameras()
+        return jsonify({
+            'success': success,
+            'message': message
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/multi_cameras/frames')
+def multi_camera_frames():
+    """Get frames from all active cameras as multipart stream"""
     def generate():
         try:
+            while len(face_recognizer.active_cameras) > 0:
+                frames_data = []
+                
+                for camera_id in list(face_recognizer.camera_frames.keys()):
+                    frame = face_recognizer.camera_frames.get(camera_id)
+                    detections = face_recognizer.camera_detections.get(camera_id, [])
+                    
+                    if frame is not None:
+                        # Draw detections
+                        if len(detections) > 0:
+                            frame = face_recognizer.draw_detections(frame, detections)
+                        
+                        # Add camera label
+                        cam_name = face_recognizer.active_cameras[camera_id]['name']
+                        cv2.putText(frame, cam_name, (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        
+                        # Encode frame
+                        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+                        ret, buffer = cv2.imencode('.jpg', frame, encode_param)
+                        if ret:
+                            frames_data.append({
+                                'camera_id': camera_id,
+                                'data': buffer.tobytes()
+                            })
+                
+                # Send all frames as JSON (base64 encoded would be better for production)
+                if frames_data:
+                    import base64
+                    response = {}
+                    for fd in frames_data:
+                        response[fd['camera_id']] = base64.b64encode(fd['data']).decode('utf-8')
+                    
+                    yield f"data: {json.dumps(response)}\n\n"
+                
+                time.sleep(0.1)  # ~10 FPS for multi-camera
+                
+        except Exception as e:
+            logger.error(f"Multi-camera frame error: {e}")
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/api/multi_cameras/status')
+def multi_camera_status():
+    """Get status of all active cameras"""
+    cameras = []
+    for camera_id, cam_info in face_recognizer.active_cameras.items():
+        cameras.append({
+            'id': camera_id,
+            'name': cam_info['name'],
+            'active': cam_info['active'],
+            'has_frame': camera_id in face_recognizer.camera_frames
+        })
+    
+    return jsonify({
+        'success': True,
+        'active_cameras': len(cameras),
+        'max_cameras': face_recognizer.max_cameras,
+        'cameras': cameras
+    })
+
+@app.route('/api/camera_frame')
+def camera_frame():
+    """Get current camera frame with optimized streaming"""
+    def generate():
+        try:
+            frame_count = 0
             while face_recognizer.camera_active and face_recognizer.current_camera:
+                frame_count += 1
                 frame, detections = face_recognizer.process_frame()
+                
                 if frame is not None:
-                    # Convert frame to JPEG
-                    ret, buffer = cv2.imencode('.jpg', frame)
+                    # Draw detections on frame
+                    if len(detections) > 0:
+                        frame = face_recognizer.draw_detections(frame, detections)
+                    
+                    # Convert frame to JPEG with compression for faster streaming
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 75]  # 75% quality = faster
+                    ret, buffer = cv2.imencode('.jpg', frame, encode_param)
                     if ret:
                         frame_bytes = buffer.tobytes()
                         yield (b'--frame\r\n'
@@ -952,7 +1295,10 @@ def camera_frame():
                 else:
                     # If no frame, break the loop
                     break
-                time.sleep(0.1)  # 10 FPS
+                
+                # Adaptive delay: Less processing = smoother video
+                time.sleep(0.05)  # ~20 FPS for smooth playback
+                
         except Exception as e:
             logger.error(f"Camera frame error: {e}")
     
@@ -1408,9 +1754,10 @@ def search_employees():
         query = request.args.get('q', '').strip()
         if not query:
             return jsonify({'success': False, 'message': 'Search query required'})
-            
-        if not face_recognizer.db:
-            face_recognizer.connect_database()
+        
+        # Ensure database connection is alive
+        if not face_recognizer.ensure_db_connection():
+            return jsonify({'success': False, 'message': 'Database connection failed'})
             
         cursor = face_recognizer.db.cursor()
         
@@ -1452,12 +1799,13 @@ def search_employees():
 def get_employee(employee_id):
     """Get single employee details"""
     try:
-        if not face_recognizer.db:
-            face_recognizer.connect_database()
+        # Ensure database connection is alive
+        if not face_recognizer.ensure_db_connection():
+            return jsonify({'success': False, 'message': 'Database connection failed'})
             
         cursor = face_recognizer.db.cursor()
         cursor.execute("""
-            SELECT id, employee_name, department, position, total_photos, 
+            SELECT id, employee_name, total_photos, 
                    is_active, uploaded_by, created_at, updated_at
             FROM multi_angle_faces 
             WHERE id = %s
@@ -1470,13 +1818,11 @@ def get_employee(employee_id):
         employee = {
             'id': row[0],
             'employee_name': row[1],
-            'department': row[2],
-            'position': row[3],
-            'total_photos': row[4],
-            'is_active': bool(row[5]),
-            'uploaded_by': row[6],
-            'created_at': str(row[7]) if row[7] else None,
-            'updated_at': str(row[8]) if row[8] else None
+            'total_photos': row[2],
+            'is_active': bool(row[3]),
+            'uploaded_by': row[4],
+            'created_at': str(row[5]) if row[5] else None,
+            'updated_at': str(row[6]) if row[6] else None
         }
         
         cursor.close()
@@ -1573,11 +1919,32 @@ def update_employee():
         # Update employee record
         logger.info("💾 Updating employee record in database...")
         if new_encodings:
+            # Get current total_photos count first
+            cursor.execute("SELECT total_photos FROM multi_angle_faces WHERE id = %s", (employee_id,))
+            current_total = cursor.fetchone()[0] or 0
+            new_total = current_total + len(new_encodings)  # Add new photos to existing count
+            
             # Update with new face encodings
-            logger.info(f"🔄 Updating with {len(new_encodings)} new face encodings...")
+            logger.info(f"🔄 Adding {len(new_encodings)} new face encodings (current: {current_total}, new total: {new_total})...")
             try:
-                encodings_json = json.dumps([encoding.tolist() for encoding in new_encodings])
-                logger.info(f"📝 Face encodings JSON created ({len(encodings_json)} characters)")
+                # Get existing encodings
+                cursor.execute("SELECT face_encoding FROM multi_angle_faces WHERE id = %s", (employee_id,))
+                existing_encoding_json = cursor.fetchone()[0]
+                
+                # Merge old and new encodings
+                all_encodings = []
+                if existing_encoding_json:
+                    try:
+                        existing_encodings = json.loads(existing_encoding_json)
+                        all_encodings.extend(existing_encodings)
+                        logger.info(f"📥 Loaded {len(existing_encodings)} existing encodings")
+                    except:
+                        logger.warning("⚠️ Could not load existing encodings, will use only new ones")
+                
+                # Add new encodings
+                all_encodings.extend([encoding.tolist() for encoding in new_encodings])
+                encodings_json = json.dumps(all_encodings)
+                logger.info(f"📝 Total face encodings: {len(all_encodings)} ({len(encodings_json)} characters)")
                 
                 update_query = """
                     UPDATE multi_angle_faces 
@@ -1587,9 +1954,9 @@ def update_employee():
                 """
                 cursor.execute(update_query, (
                     employee_name, is_active, encodings_json, 
-                    len(new_encodings), employee_id
+                    new_total, employee_id
                 ))
-                message = f"Employee {employee_id} updated with {len(new_encodings)} new photos"
+                message = f"Employee {employee_id} updated: added {len(new_encodings)} photos (total: {new_total})"
                 logger.info(f"✅ Database update successful: {message}")
             except Exception as e:
                 logger.error(f"❌ Database update with photos failed: {str(e)}")

@@ -86,21 +86,63 @@ python main.py  # Main launcher with options
 
 ## 🔧 Configuration
 
+### Database Configuration
+
+The system supports **two database environments**:
+
+#### 🧪 Testing Environment (Default)
+- Database: `hrm_database`
+- Used for development and testing
+- Default configuration in code
+
+#### 🏭 Production Environment
+- Database: `hrm_production`  
+- Used for live deployment
+- Separate from testing data
+
+#### Environment Setup
+
+1. **Create .env file** (copy from .env.example):
+```bash
+cp .env.example .env
+```
+
+2. **Configure environment variables**:
+```env
+# Set environment mode
+FACE_RECOGNITION_ENV=testing    # or 'production'
+
+# Testing Database
+TEST_DB_HOST=localhost
+TEST_DB_USER=root
+TEST_DB_PASSWORD=root
+TEST_DB_NAME=hrm_database
+
+# Production Database
+PROD_DB_HOST=localhost
+PROD_DB_USER=root
+PROD_DB_PASSWORD=your_secure_password
+PROD_DB_NAME=hrm_production
+```
+
+3. **Setup Production Database**:
+```bash
+python setup_production_db.py
+```
+
+4. **Switch to Production**:
+```bash
+# Set environment variable
+set FACE_RECOGNITION_ENV=production
+
+# Or in .env file
+FACE_RECOGNITION_ENV=production
+```
+
 ### CCTV Settings
 - **Default CCTV URL**: `rtsp://cctv1:cctv%254321@160.191.137.18:8554/cam/realmonitor?channel={channel}&subtype=0`
 - **Channels**: 1-127 supported
 - **Protocol**: RTSP over TCP
-
-### Database Configuration
-Update MySQL connection settings in the Python files:
-```python
-mysql.connector.connect(
-    host='localhost',
-    user='root',
-    password='your_password',
-    database='hrm_db'
-)
-```
 
 ## 📁 Project Structure
 

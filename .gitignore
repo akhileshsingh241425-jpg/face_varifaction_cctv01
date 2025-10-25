@@ -51,6 +51,15 @@ recorded_videos/
 *.avi
 *.mov
 
+# Face crops and detections
+face_crops/
+multi_angle_photos/
+
+# Model files
+*.pt
+*.pth
+*.onnx
+
 # OS
 .DS_Store
 Thumbs.db
